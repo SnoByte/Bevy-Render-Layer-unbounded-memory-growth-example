@@ -1,9 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{
-        Viewport,
-        visibility::RenderLayers,
-    },
+    camera::visibility::RenderLayers,
     core_pipeline::prepass::{DeferredPrepass, DepthPrepass},
     image::ImageSampler,
     light::CascadeShadowConfigBuilder,
@@ -21,9 +18,25 @@ use bevy::{
 const TOGGLE_SECONDS: f32 = 0.5;
 const TEST_LAYER: usize = 1;
 
+#[derive(Clone, Copy, Debug)]
+enum DrawingMode {
+    Direct,
+    Indirect,
+}
+
+impl DrawingMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Indirect => "indirect",
+        }
+    }
+}
+
 #[derive(Resource, Clone, Copy)]
-struct ShadowTestConfig {
+struct TestConfig {
     shadows_enabled: bool,
+    drawing_mode: DrawingMode,
 }
 
 #[derive(Resource)]
@@ -34,11 +47,11 @@ struct CameraLayerToggle {
 }
 
 fn main() {
-    let shadows_enabled = shadows_enabled_from_cli();
+    let config = config_from_cli();
 
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.025, 0.03, 0.04)))
-        .insert_resource(ShadowTestConfig { shadows_enabled })
+        .insert_resource(config)
         .insert_resource(CameraLayerToggle {
             timer: Timer::from_seconds(TOGGLE_SECONDS, TimerMode::Repeating),
             camera_on_test_layer: false,
@@ -47,10 +60,11 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!(
-                    "Bevy camera RenderLayers shadow leak repro — shadows {}",
-                    if shadows_enabled { "ON" } else { "OFF" }
+                    "Bevy camera RenderLayers shadow leak repro — {} — shadows {}",
+                    config.drawing_mode.label(),
+                    if config.shadows_enabled { "ON" } else { "OFF" }
                 ),
-                resolution: (960, 480).into(),
+                resolution: (960, 540).into(),
                 present_mode: PresentMode::AutoNoVsync,
                 ..default()
             }),
@@ -61,31 +75,49 @@ fn main() {
         .run();
 }
 
-fn shadows_enabled_from_cli() -> bool {
+fn config_from_cli() -> TestConfig {
     let mut shadows_enabled = true;
+    let mut drawing_mode = None;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--shadows" => shadows_enabled = true,
             "--no-shadows" => shadows_enabled = false,
+            "--direct" => set_drawing_mode(&mut drawing_mode, DrawingMode::Direct),
+            "--indirect" => set_drawing_mode(&mut drawing_mode, DrawingMode::Indirect),
             "-h" | "--help" => {
                 println!(
                     "Camera RenderLayers shadow leak repro\n\n\
                      Usage:\n\
-                       cargo run -- --shadows       # shadow maps enabled (default)\n\
-                       cargo run -- --no-shadows    # shadow maps disabled control\n\n\
+                       cargo run -- --direct [--shadows|--no-shadows]\n\
+                       cargo run -- --indirect [--shadows|--no-shadows]\n\n\
+                     --direct      Insert NoIndirectDrawing on the single Camera3d\n\
+                     --indirect    Use Bevy's normal indirect drawing path\n\
+                     --shadows     Enable shadow maps (default)\n\
+                     --no-shadows  Disable shadow maps\n\n\
                      The test runs forever and toggles the existing RenderLayers value on\n\
-                     both Camera3d entities between the default layer and layer {TEST_LAYER}."
+                     the single Camera3d between the default layer and layer {TEST_LAYER}."
                 );
                 std::process::exit(0);
             }
             other => panic!(
-                "unknown argument {other:?}; expected --shadows, --no-shadows, or --help"
+                "unknown argument {other:?}; expected --direct, --indirect, --shadows, --no-shadows, or --help"
             ),
         }
     }
 
-    shadows_enabled
+    TestConfig {
+        shadows_enabled,
+        drawing_mode: drawing_mode.unwrap_or(DrawingMode::Indirect),
+    }
+}
+
+fn set_drawing_mode(slot: &mut Option<DrawingMode>, mode: DrawingMode) {
+    if slot.is_some() {
+        panic!("select only one drawing mode: --direct or --indirect");
+    }
+
+    *slot = Some(mode);
 }
 
 fn region_mesh(x_min: f32, x_max: f32) -> Mesh {
@@ -112,7 +144,7 @@ fn region_mesh(x_min: f32, x_max: f32) -> Mesh {
 
 fn setup(
     mut commands: Commands,
-    config: Res<ShadowTestConfig>,
+    config: Res<TestConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -218,50 +250,31 @@ fn setup(
         Name::new("spot shadow light"),
     ));
 
-    // Preserve the two-camera direct/indirect split from the reproducing test.
+    // A single camera is used for the repro.
     // RenderLayers exists from startup; the test only mutates its value in place.
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            viewport: Some(Viewport {
-                physical_position: UVec2::ZERO,
-                physical_size: UVec2::new(480, 480),
-                ..default()
-            }),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        RenderLayers::default(),
-        NoIndirectDrawing,
-        Msaa::Off,
-        DepthPrepass,
-        DeferredPrepass,
-        Name::new("direct camera"),
-    ));
+    // Direct mode inserts NoIndirectDrawing. Indirect mode uses Bevy's normal path.
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            RenderLayers::default(),
+            Msaa::Off,
+            DepthPrepass,
+            DeferredPrepass,
+            Name::new(format!("{} camera", config.drawing_mode.label())),
+        ))
+        .id();
 
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: 1,
-            clear_color: ClearColorConfig::None,
-            viewport: Some(Viewport {
-                physical_position: UVec2::new(480, 0),
-                physical_size: UVec2::new(480, 480),
-                ..default()
-            }),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        RenderLayers::default(),
-        Msaa::Off,
-        DepthPrepass,
-        DeferredPrepass,
-        Name::new("indirect camera"),
-    ));
+    if matches!(config.drawing_mode, DrawingMode::Direct) {
+        commands.entity(camera).insert(NoIndirectDrawing);
+    }
 
     println!(
-        "camera RenderLayers shadow leak repro started; shadows_enabled={}, toggle_seconds={}, test_layer={}; test runs forever",
-        config.shadows_enabled, TOGGLE_SECONDS, TEST_LAYER
+        "camera RenderLayers shadow leak repro started; drawing_mode={}, shadows_enabled={}, toggle_seconds={}, test_layer={}; test runs forever",
+        config.drawing_mode.label(),
+        config.shadows_enabled,
+        TOGGLE_SECONDS,
+        TEST_LAYER
     );
 }
 
