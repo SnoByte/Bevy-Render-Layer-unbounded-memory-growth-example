@@ -1,0 +1,27 @@
+[package]
+name = "bevy_camera_layers_shadow_leak_repro"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bevy = { version = "0.19.1", default-features = false, features = [
+    "std",
+    "async_executor",
+
+    "bevy_asset",
+    "bevy_color",
+    "bevy_window",
+    "bevy_winit",
+    "x11",
+
+    "bevy_image",
+    "bevy_mesh",
+    "bevy_camera",
+    "bevy_light",
+    "bevy_material",
+
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+] }
